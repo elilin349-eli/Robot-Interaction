@@ -123,7 +123,7 @@ class ConfigLoader:
 CONFIG = ConfigLoader()
 
 APP_ID = os.environ.get('IFLY_APP_ID', CONFIG.get('defaults.app_id', 'REMOVED'))
-API_KEY = os.environ.get('IFLY_API_KEY', CONFIG.get('defaults.api_key', 'REMOVED'))
+API_KEY = os.environ.get('IFLY_API_KEY', CONFIG.get('defaults.api_key', 'YOUR_API_KEY_HERE'))
 API_SECRET = os.environ.get('IFLY_API_SECRET', CONFIG.get('defaults.api_secret', 'MWNlODE0YzRhODEyYTFjNmMwNTVkZmFh'))
 
 ACCENT = os.environ.get('IFLY_ACCENT', CONFIG.get('speech.accent', 'mandarin'))
