@@ -124,7 +124,7 @@ CONFIG = ConfigLoader()
 
 APP_ID = os.environ.get('IFLY_APP_ID', CONFIG.get('defaults.app_id', 'YOUR_APP_ID_HERE'))
 API_KEY = os.environ.get('IFLY_API_KEY', CONFIG.get('defaults.api_key', 'YOUR_API_KEY_HERE'))
-API_SECRET = os.environ.get('IFLY_API_SECRET', CONFIG.get('defaults.api_secret', 'MWNlODE0YzRhODEyYTFjNmMwNTVkZmFh'))
+API_SECRET = os.environ.get('IFLY_API_SECRET', CONFIG.get('defaults.api_secret', 'YOUR_API_SECRET_HERE'))
 
 ACCENT = os.environ.get('IFLY_ACCENT', CONFIG.get('speech.accent', 'mandarin'))
 RATE = CONFIG.get('speech.sample_rate', 16000)
