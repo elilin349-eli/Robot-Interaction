@@ -171,7 +171,7 @@ commands:
 
 # 环境变量覆盖（从 .env 读取，此处为默认值）
 defaults:
-  app_id: "REMOVED"
+  app_id: "YOUR_APP_ID_HERE"
   api_key: "YOUR_API_KEY_HERE"
   api_secret: "YOUR_API_SECRET_HERE"
   sample_rate: 16000
