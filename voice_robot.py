@@ -50,7 +50,7 @@ if os.path.exists(env_path):
         pass
 
 APP_ID = os.environ.get('IFLY_APP_ID', 'YOUR_APP_ID_HERE')
-API_KEY = os.environ.get('IFLY_API_KEY', 'REMOVED')
+API_KEY = os.environ.get('IFLY_API_KEY', 'YOUR_API_KEY_HERE')
 API_SECRET = os.environ.get('IFLY_API_SECRET', 'MWNlODE0YzRhODEyYTFjNmMwNTVkZmFh')
 
 ACCENT = os.environ.get('IFLY_ACCENT', 'mandarin')
