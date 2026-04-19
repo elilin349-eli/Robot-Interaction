@@ -13,8 +13,13 @@ LeRobot SO-101 硬件通信模块 (v2.0 - FeetechMotorsBus 直接集成)
 import json
 import time
 import os
+import threading
+import re
 from datetime import datetime
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import threading
 from pathlib import Path
 
 # 【兼容性补丁】舵机底层 SDK 别名映射
@@ -64,6 +69,8 @@ class SO101LeaderArm:
         self.timeout = timeout
         self.bus = None
         self.connected = False
+        self._io_lock = threading.Lock()
+        self.available_motors = [1, 2, 3, 4, 5, 6]
         self.calib_path = self._get_calib_path()
         self._init_bus()
         
@@ -122,13 +129,16 @@ class SO101LeaderArm:
                 try:
                     self.bus.connect()
                 except Exception as motor_check_error:
-                    # 【容错处理】如果是舵机检测失败（常见于 6 号过载）
                     error_msg = str(motor_check_error)
                     if "motor check failed" in error_msg or "Missing motor IDs" in error_msg:
                         print(f"⚠️  舵机部分故障: {error_msg}")
-                        print("⚠️  尝试继续连接（忽略故障舵机）...")
-                        
-                        # 强制设置连接状态，允许部分功能继续运行
+                        missing_match = re.search(r"Missing motor IDs:\s*\[([^\]]*)\]", error_msg)
+                        if missing_match:
+                            missing_text = missing_match.group(1).strip()
+                            missing_ids = [int(x.strip()) for x in missing_text.split(',') if x.strip().isdigit()]
+                            if missing_ids:
+                                self.available_motors = [m for m in range(1, 7) if m not in missing_ids]
+                                print(f"⚠️  降级可用舵机: {self.available_motors}")
                         self.connected = True
                         print(f"✅ 主臂已连接（降级模式，部分舵机可能不可用）")
                         return True
@@ -136,6 +146,7 @@ class SO101LeaderArm:
                         raise  # 其他错误继续抛出
                 
                 self.connected = True
+                self.available_motors = [1, 2, 3, 4, 5, 6]
                 print(f"✅ 主臂已连接 ({self.port})")
                 return True
             else:
@@ -159,6 +170,28 @@ class SO101LeaderArm:
             print(f"⚠️  关闭连接时出错: {e}")
             return False
     
+    def set_torque(self, enable: bool):
+        """
+        统一控制所有电机的力矩使能状态
+        
+        Args:
+            enable: True 为锁定(发力)，False 为释放(失力)
+        """
+        val = 1 if enable else 0
+        if not self.bus:
+            return
+        with self._io_lock:
+            for motor_id in self.available_motors:
+                try:
+                    self.bus._write(
+                        self.REGISTER_TORQUE_ENABLE,
+                        self.TORQUE_ENABLE_LENGTH,
+                        motor_id,
+                        val
+                    )
+                except Exception as e:
+                    print(f"⚠️  设置电机 {motor_id} 力矩失败: {e}")
+    
     def read_angles(self) -> Optional[List[int]]:
         """
         读取主臂的 6 个关节位置（原始编码值 0-4095）
@@ -173,27 +206,25 @@ class SO101LeaderArm:
         
         try:
             angles = []
-            for motor_id in range(1, 7):
-                # 使用底层 _read 接口：(address, length, motor_id)
-                result = self.bus._read(
-                    self.REGISTER_CURRENT_POS,
-                    self.REGISTER_LENGTH,
-                    motor_id
-                )
-                
-                # 【关键修复】_read 返回 (value, error_code) 元组，必须严格解包
-                # 直接 int(result) 会导致 "int() argument must be a string"崩溃
-                if isinstance(result, (tuple, list)) and len(result) >= 1:
-                    val = result[0]
-                else:
-                    val = result
-                
-                # 再次确保 val 是有效的数值
-                if val is not None:
-                    angles.append(int(val))
-                else:
-                    print(f"⚠️  电机 {motor_id} 读取失败")
-                    return None
+            with self._io_lock:
+                for motor_id in range(1, 7):
+                    if motor_id not in self.available_motors:
+                        angles.append(0)
+                        continue
+                    result = self.bus._read(
+                        self.REGISTER_CURRENT_POS,
+                        self.REGISTER_LENGTH,
+                        motor_id
+                    )
+                    if isinstance(result, (tuple, list)) and len(result) >= 1:
+                        val = result[0]
+                    else:
+                        val = result
+                    if val is not None:
+                        angles.append(int(val))
+                    else:
+                        print(f"⚠️  电机 {motor_id} 读取失败")
+                        return None
             
             return angles
         except Exception as e:
@@ -201,51 +232,37 @@ class SO101LeaderArm:
             return None
     
     def safe_write(self, motor_id: int, target_pos: int) -> bool:
-        """
-        【新增】安全写入：带软限位保护的单舵机写入
-        
-        特别针对 6 号舵机（夹持器）的过载保护。基于实测数据，
-        6 号舵机在 2954 时容易卡顿，故设置安全区间为 [1000, 2800]。
-        
-        Args:
-            motor_id: 电机 ID (1-6)
-            target_pos: 目标位置 (0-4095)
-        
-        Returns:
-            成功返回 True
-        """
+        """单舵机安全写入，使用全局范围保护。"""
         if not self.connected or not self.bus:
+            return False
+        if motor_id not in self.available_motors:
+            print(f"⚠️  电机 {motor_id} 不可用，跳过写入")
             return False
         
         try:
-            # 【硬件保护】6 号舵机的专属限位，防止过载
-            if motor_id == 6:
-                target_pos = max(1000, min(target_pos, 2800))
-                print(f"🛡️  6号舵机软限位: {target_pos} (安全区间: [1000, 2800])")
-            else:
-                target_pos = max(self.POS_MIN, min(target_pos, self.POS_MAX))
-            
-            # 启用力矩
-            try:
-                self.bus._write(self.REGISTER_TORQUE_ENABLE, self.TORQUE_ENABLE_LENGTH, motor_id, 1)
-            except Exception:
-                pass
-            
-            # 写入位置
-            self.bus._write(self.REGISTER_TARGET_POS, self.REGISTER_LENGTH, motor_id, int(target_pos))
+            target_pos = max(self.POS_MIN, min(target_pos, self.POS_MAX))
+
+            with self._io_lock:
+                try:
+                    self.bus._write(self.REGISTER_TORQUE_ENABLE, self.TORQUE_ENABLE_LENGTH, motor_id, 1)
+                except Exception:
+                    pass
+                self.bus._write(self.REGISTER_TARGET_POS, self.REGISTER_LENGTH, motor_id, int(target_pos))
             return True
         except Exception as e:
             print(f"⚠️  舵机 {motor_id} 写入失败: {e}")
             return False
     
-    def safe_playback(self, sequence: List[Dict]) -> bool:
+    def safe_playback(self, sequence: List[Dict], stop_signal: Optional['threading.Event'] = None) -> bool:
         """
         修正后的回放函数：
         1. 严格对齐 self.bus._write(address, length, motor_id, value)
         2. 尊重原代码 6 号舵机 2800 的物理限位
+        3. 【P0修复 问题2】支持中断信号，允许主线程在回放中途停止
         
         Args:
             sequence: 动作序列，每个元素是 {'timestamp': ..., 'angles': [...]}
+            stop_signal: threading.Event，当 is_set() 时立即停止回放
         
         Returns:
             成功返回 True
@@ -260,6 +277,11 @@ class SO101LeaderArm:
         
         try:
             for frame in sequence:
+                # 【P0修复 问题2】轮询检查中断信号
+                if stop_signal and stop_signal.is_set():
+                    print("🛑 回放被中断")
+                    return False
+                
                 angles = frame.get('angles', [])
                 if len(angles) != 6:
                     print(f"⚠️  帧数据不完整，跳过")
@@ -267,13 +289,13 @@ class SO101LeaderArm:
                 
                 for i, pos in enumerate(angles):
                     motor_id = i + 1
-                    # 严格限位逻辑
-                    upper_limit = 2800 if motor_id == 6 else 3000
-                    safe_pos = max(1000, min(pos, upper_limit))
+                    if motor_id not in self.available_motors:
+                        continue
+                    safe_pos = max(self.POS_MIN, min(pos, self.POS_MAX))
                     
                     try:
-                        # 正确的 API 调用顺序：地址 42, 长度 2, ID, 数值
-                        self.bus._write(42, 2, motor_id, safe_pos)
+                        with self._io_lock:
+                            self.bus._write(42, 2, motor_id, safe_pos)
                     except Exception as e:
                         print(f"⚠️  电机 {motor_id} 回放失败: {e}")
                         continue
@@ -301,33 +323,34 @@ class SO101LeaderArm:
         
         try:
             for motor_id, target_pos in enumerate(angles, start=1):
+                if motor_id not in self.available_motors:
+                    continue
                 # ...existing code...
                 if not (self.POS_MIN <= target_pos <= self.POS_MAX):
                     print(f"⚠️  电机 {motor_id} 的目标位置 {target_pos} 超出范围 [{self.POS_MIN}, {self.POS_MAX}]")
                     target_pos = max(self.POS_MIN, min(self.POS_MAX, target_pos))
-                
-                # 【修复2】先启用力矩（Address 40, Length 1, Value 1）
-                try:
-                    self.bus._write(
-                        self.REGISTER_TORQUE_ENABLE,
-                        self.TORQUE_ENABLE_LENGTH,
-                        motor_id,
-                        1  # 力矩使能 = 1
-                    )
-                except Exception as e:
-                    print(f"⚠️  电机 {motor_id} 力矩启用失败: {e}")
-                
-                # 再写入目标位置（Address 42, Length 2）
-                try:
-                    self.bus._write(
-                        self.REGISTER_TARGET_POS,
-                        self.REGISTER_LENGTH,
-                        motor_id,
-                        int(target_pos)
-                    )
-                except Exception as e:
-                    print(f"❌ 电机 {motor_id} 位置写入失败: {e}")
-                    return False
+
+                with self._io_lock:
+                    try:
+                        self.bus._write(
+                            self.REGISTER_TORQUE_ENABLE,
+                            self.TORQUE_ENABLE_LENGTH,
+                            motor_id,
+                            1
+                        )
+                    except Exception as e:
+                        print(f"⚠️  电机 {motor_id} 力矩启用失败: {e}")
+
+                    try:
+                        self.bus._write(
+                            self.REGISTER_TARGET_POS,
+                            self.REGISTER_LENGTH,
+                            motor_id,
+                            int(target_pos)
+                        )
+                    except Exception as e:
+                        print(f"❌ 电机 {motor_id} 位置写入失败: {e}")
+                        return False
             
             return True
         except Exception as e:
@@ -360,6 +383,8 @@ class GestureRecorder:
         # 初始加载整个库，如果是旧版列表格式则清空重开
         self.library = self._load_library()
         self.current_recording = []
+        # 【P1修复】线程锁保护，防止并发冲突
+        self.lock = threading.Lock()
     
     def _load_library(self) -> Dict:
         """加载现有的记录库（字典格式）"""
@@ -385,15 +410,18 @@ class GestureRecorder:
             print(f"❌ 角度数组长度不正确: 需要 6，收到 {len(angles)}")
             return False
         
-        self.current_recording.append({
-            'timestamp': time.time(),
-            'angles': list(angles)
-        })
+        # 【P1修复】加锁保护，防止并发冲突
+        with self.lock:
+            self.current_recording.append({
+                'timestamp': time.time(),
+                'angles': list(angles)
+            })
         return True
     
     def save_named_action(self, name: str) -> bool:
         """
-        录制结束时统一持久化到磁盘
+        录制结束时统一持久化到磁盘（优化版：支持字典格式的命名动作）
+        【优化】锁内拷贝数据，锁外写盘，避免 I/O 阻塞录制线程
         
         Args:
             name: 动作名称（用于后续执行和回放）
@@ -401,16 +429,22 @@ class GestureRecorder:
         Returns:
             成功返回 True
         """
-        if not self.current_recording:
-            print(f"⚠️  当前无录制数据")
-            return False
+        # 【第一阶段】加锁保护，仅做数据拷贝和清空
+        with self.lock:
+            if not self.current_recording:
+                print(f"⚠️  当前无录制数据")
+                return False
+            
+            # 拷贝数据
+            recording_copy = list(self.current_recording)
+            self.current_recording = []  # 清空缓存准备下一次
         
-        self.library[name] = self.current_recording
+        # 【第二阶段】锁外执行耗时的磁盘 I/O，避免阻塞录制线程
         try:
+            self.library[name] = recording_copy
             with open(self.filename, 'w', encoding='utf-8') as f:
                 json.dump(self.library, f, ensure_ascii=False, indent=4)
-            print(f"✅ 已存储动作库中: {name} (共 {len(self.current_recording)} 帧)")
-            self.current_recording = []  # 清空缓存准备下一次
+            print(f"✅ 已存储动作库中: {name} (共 {len(recording_copy)} 帧)")
             return True
         except Exception as e:
             print(f"❌ 存储失败: {e}")
@@ -419,6 +453,7 @@ class GestureRecorder:
     def record_gesture(self, angles: List[int], label: str = "", metadata: Optional[Dict] = None):
         """
         【兼容接口】记录一个单帧姿态（用于保持与旧版本的兼容性）
+        【P0修复】添加线程安全锁保护，确保与 save_named_action 的竞态条件被排除
         
         Args:
             angles: 6 维关节位置数组 (编码值 0-4095)
@@ -435,7 +470,9 @@ class GestureRecorder:
             "label": label,
             "metadata": metadata or {}
         }
-        self.current_recording.append(record)
+        # 【关键】在锁保护下执行写入操作，防止 save_named_action 中的清空操作产生竞态条件
+        with self.lock:
+            self.current_recording.append(record)
         print(f"✅ 已记录姿态: {label}")
         return True
     

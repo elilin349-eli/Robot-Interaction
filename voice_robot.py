@@ -127,9 +127,9 @@ class ConfigLoader:
 # 加载配置
 CONFIG = ConfigLoader()
 
-APP_ID = os.environ.get('IFLY_APP_ID', CONFIG.get('defaults.app_id', 'YOUR_APP_ID_HERE'))
-API_KEY = os.environ.get('IFLY_API_KEY', CONFIG.get('defaults.api_key', 'YOUR_API_KEY_HERE'))
-API_SECRET = os.environ.get('IFLY_API_SECRET', CONFIG.get('defaults.api_secret', 'YOUR_API_SECRET_HERE'))
+APP_ID = os.environ.get('IFLY_APP_ID', CONFIG.get('defaults.app_id', 'REMOVED'))
+API_KEY = os.environ.get('IFLY_API_KEY', CONFIG.get('defaults.api_key', 'REMOVED'))
+API_SECRET = os.environ.get('IFLY_API_SECRET', CONFIG.get('defaults.api_secret', 'MWNlODE0YzRhODEyYTFjNmMwNTVkZmFh'))
 
 ACCENT = os.environ.get('IFLY_ACCENT', CONFIG.get('speech.accent', 'mandarin'))
 RATE = CONFIG.get('speech.sample_rate', 16000)
@@ -145,6 +145,8 @@ ROBOT_QUEUE = queue.Queue()
 LATEST_RMS = 0.0
 RMS_LOCK = threading.Lock()
 LAST_TEXT = ""
+# 【P0修复 问题2】全局停止信号，用于中断回放
+STOP_SIGNAL = threading.Event()
 
 # VAD 阈值
 START_THRESHOLD = 6.0
@@ -161,50 +163,46 @@ CMD_FILE = os.path.join(os.path.dirname(__file__), CONFIG.get('logging.cmd_json'
 # ==========================================
 class TTSEngine:
     """文字转语音（中文）"""
-    _lock = threading.Lock()
 
     def __init__(self):
         self.enabled = TTS_AVAILABLE
-        self.engine = None
-        self.speak_thread = None
+        self._queue = queue.Queue()
         if TTS_AVAILABLE:
             try:
                 self.engine = pyttsx3.init()
-                self.engine.setProperty('rate', 150)  # 语速
-                self.engine.setProperty('volume', 0.8)  # 音量
-                # 注册退出钩子，防止 GC 时模块已被销毁导致的 NoneType 崩溃
+                self.engine.setProperty('rate', 160)
+                self.engine.setProperty('volume', 0.8)
+                threading.Thread(target=self._worker, daemon=True).start()
                 atexit.register(self.stop)
             except Exception as e:
                 print(f"⚠️  TTS 初始化失败: {e}")
                 self.enabled = False
 
+    def _worker(self):
+        while True:
+            text = self._queue.get()
+            if text is None:
+                break
+            try:
+                self.engine.say(text)
+                self.engine.runAndWait()
+            except Exception as e:
+                print(f"⚠️ TTS 播放异常: {e}")
+
     def stop(self):
         """显式停止引擎"""
         if self.enabled and self.engine:
             try:
+                self._queue.put(None)
                 self.engine.stop()
-            except:
+            except Exception:
                 pass
 
     def speak(self, text):
-        """播放语音反馈（异步，不阻塞主线程）"""
+        """异步播报"""
         if not self.enabled or not text:
             return
-
-        # 【修复】使用独立线程运行 TTS，避免 run loop 冲突
-        def _speak_async():
-            try:
-                with self.__class__._lock:
-                    if self.engine:
-                        self.engine.say(text)
-                        self.engine.runAndWait()
-            except Exception as e:
-                # 静默捕获 TTS 错误，防止程序崩溃
-                print(f"⚠️  [后台] TTS 播放异常: {e}")
-
-        # 启动后台线程，不阻塞主程序
-        self.speak_thread = threading.Thread(target=_speak_async, daemon=True)
-        self.speak_thread.start()
+        self._queue.put(text)
 
 
 tts = TTSEngine()
@@ -222,12 +220,22 @@ class CommandMatcher:
         self.fuzzy_threshold = config.get('speech.fuzzy_match_threshold', 0.75)
 
     def match(self, text: str) -> Tuple[Optional[str], float]:
-        """
-        匹配指令。返回 (action_name, similarity_score)
-        similarity_score: 0-1，表示置信度
-        """
         if not text:
             return None, 0.0
+
+        # 精确匹配时优先选择最长关键词，避免短词截胡。
+        best_exact_action = None
+        best_exact_len = 0
+        for action_name, action_config in self.commands.items():
+            if not isinstance(action_config, dict):
+                continue
+            for kw in action_config.get('keywords', []):
+                if kw in text and len(kw) > best_exact_len:
+                    best_exact_len = len(kw)
+                    best_exact_action = action_name
+
+        if best_exact_action:
+            return best_exact_action, 1.0
 
         best_action = None
         best_score = 0.0
@@ -236,24 +244,13 @@ class CommandMatcher:
             if not isinstance(action_config, dict):
                 continue
 
-            keywords = action_config.get('keywords', [])
-
-            # 【精确匹配】：只要包含任何关键词就立刻返回
-            for kw in keywords:
-                if kw in text:
-                    return action_name, 1.0
-
-            # 【模糊匹配】：用 difflib 计算相似度
-            for kw in keywords:
+            for kw in action_config.get('keywords', []):
                 score = difflib.SequenceMatcher(None, text, kw).ratio()
                 if score > best_score:
                     best_score = score
                     best_action = action_name
-
-        # 只返回超过阈值的结果
         if best_score >= self.fuzzy_threshold:
             return best_action, best_score
-
         return None, best_score
 
     def get_tts_feedback(self, action_name: str) -> str:
@@ -363,6 +360,9 @@ class ProcessManager:
     def __init__(self):
         self.process = None
         self.lock = threading.Lock()
+        self.waiting_for_naming = False
+        self.pending_record_path = None
+        self._record_snapshot = set()
 
         # 主臂硬件接口
         self.leader_arm = None
@@ -371,6 +371,22 @@ class ProcessManager:
         
         # 从臂硬件接口（用于协同演示）
         self.follower_arm = None
+
+        # --- Whisper 补位方案：预加载模型 ---
+        self.whisper_model = None
+        if WHISPER_AVAILABLE:
+            print("🚀 正在预加载 Whisper base 模型...")
+            try:
+                self.whisper_model = whisper.load_model("base")
+                print("✅ Whisper 模型加载完成")
+            except Exception as e:
+                print(f"⚠️  Whisper 预加载失败: {e}")
+
+        self.is_active = False
+        self.active_timer = None
+        self.WAKE_WORDS = ["机器人", "开始指令", "小臂小臂", "小臂", "激活"]
+        self.ACTIVE_DURATION = 20.0
+        self.operation_mode = None
 
         # 注册清理钩子，程序退出时强制杀死子进程
         atexit.register(self.cleanup)
@@ -386,6 +402,10 @@ class ProcessManager:
             if self.process is not None:
                 print("⚠️  LeRobot 进程已在运行")
                 return False
+
+            self.waiting_for_naming = False
+            self.pending_record_path = None
+            self._record_snapshot = self._scan_record_artifacts()
 
             script_path = CONFIG.get('lerobot.script_path', 'lerobot/scripts/control_robot.py')
             cmd = f"conda run -n {env_name} python {script_path} teleoperate --robot-path {robot_path} --record"
@@ -423,11 +443,52 @@ class ProcessManager:
                 print("✅ LeRobot 采集已停止")
                 tts.speak("停止记录，数据已保存")
                 self.process = None
+                self.pending_record_path = self._find_new_record_artifact(self._record_snapshot)
+                self.waiting_for_naming = True
                 return True
             except Exception as e:
                 print(f"⚠️  停止 LeRobot 时出错: {e}")
                 self.process = None
                 return False
+
+    def _scan_record_artifacts(self):
+        roots = ["data", "datasets", "outputs", "recordings"]
+        found = set()
+        for root in roots:
+            abs_root = os.path.join(os.getcwd(), root)
+            if not os.path.exists(abs_root):
+                continue
+            try:
+                for name in os.listdir(abs_root):
+                    found.add(os.path.join(abs_root, name))
+            except Exception:
+                continue
+        return found
+
+    def _find_new_record_artifact(self, before_set):
+        candidates = list(self._scan_record_artifacts() - (before_set or set()))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return candidates[0]
+
+    def finalize_record_naming(self, new_name: str) -> bool:
+        if not new_name:
+            return False
+        if not self.pending_record_path or not os.path.exists(self.pending_record_path):
+            return False
+
+        parent = os.path.dirname(self.pending_record_path)
+        ext = os.path.splitext(self.pending_record_path)[1]
+        target = os.path.join(parent, f"{new_name}{ext}")
+        if target == self.pending_record_path:
+            self.waiting_for_naming = False
+            return True
+
+        os.rename(self.pending_record_path, target)
+        self.pending_record_path = target
+        self.waiting_for_naming = False
+        return True
 
     def _init_leader_arm(self):
         """初始化主臂硬件接口"""
@@ -461,7 +522,8 @@ class ProcessManager:
             print(f"📦 从臂模块已初始化 (端口: {port})")
             
             if not self.follower_arm.connect():
-                print(f"⚠️  从臂连接失败，请检查 COM11 端口")
+                # 【P2修复 问题6】使用动态变量替换硬编码端口
+                print(f"⚠️  从臂连接失败，请检查 {port} 端口")
                 self.follower_arm = None
             else:
                 print("✅ 从臂连接已建立")
@@ -469,9 +531,38 @@ class ProcessManager:
             print(f"⚠️  从臂初始化失败: {e}")
             self.follower_arm = None
     
+    def activate(self, reason="语音唤醒"):
+        """激活指令监听窗口"""
+        self.is_active = True
+
+        if self.operation_mode == 'teaching':
+            if self.active_timer:
+                self.active_timer.cancel()
+                self.active_timer = None
+            print(f"🟢 [系统激活] 原因: {reason} | 状态：示教模式锁定")
+            return
+
+        if self.active_timer:
+            self.active_timer.cancel()
+
+        self.active_timer = threading.Timer(self.ACTIVE_DURATION, self.deactivate)
+        self.active_timer.start()
+
+        print(f"🟢 [系统激活] 原因: {reason} | 监听窗口开启 {self.ACTIVE_DURATION}s")
+        if reason == "语音唤醒":
+            tts.speak("我在，请吩咐")
+
+    def deactivate(self):
+        """进入待机状态"""
+        if self.operation_mode == 'teaching':
+            return
+        self.is_active = False
+        print("🔴 [系统待机] 监听窗口已关闭，等待唤醒...")
+    
     def execute_action(self, action_name: str) -> bool:
         """
         线程安全地在从臂执行命名动作
+        【深水区优化】锁粒度精简：仅锁住内存读取，将耗时的 safe_playback 移出锁块
         
         Args:
             action_name: 动作名称（必须在 gesture_recorder.library 中存在）
@@ -479,6 +570,7 @@ class ProcessManager:
         Returns:
             成功返回 True
         """
+        # 【优化】第一阶段：在锁保护下仅进行快速检查和数据读取
         with self.lock:
             if not self.gesture_recorder or action_name not in self.gesture_recorder.library:
                 print(f"⚠️  动作库中不存在: {action_name}")
@@ -490,18 +582,22 @@ class ProcessManager:
                 tts.speak("从臂未连接")
                 return False
             
-            try:
-                data = self.gesture_recorder.library[action_name]
-                if self.follower_arm.safe_playback(data):
-                    tts.speak(f"已在从臂上执行{action_name}")
-                    return True
-                else:
-                    tts.speak(f"回放{action_name}失败")
-                    return False
-            except Exception as e:
-                print(f"❌ 执行动作失败: {e}")
-                tts.speak("执行动作出错")
+            # 仅在锁内读取一份数据副本，然后立即释放锁
+            data = self.gesture_recorder.library[action_name]
+        
+        # 【优化】第二阶段：在锁外进行长耗时的硬件回放
+        # 这样 STOP 指令可以不被阻塞地进入
+        try:
+            if self.follower_arm.safe_playback(data, stop_signal=STOP_SIGNAL):
+                tts.speak(f"已在从臂上执行{action_name}")
+                return True
+            else:
+                tts.speak(f"回放{action_name}失败")
                 return False
+        except Exception as e:
+            print(f"❌ 执行动作失败: {e}")
+            tts.speak("执行动作出错")
+            return False
 
     def record_gesture_from_leader(self, label: str = ""):
         """从主臂读取当前姿态并记录"""
@@ -529,6 +625,10 @@ class ProcessManager:
 
     def start_gesture_recording(self):
         """开始连续记录主臂姿态"""
+        if self.recording_gestures:
+            print("⚠️ 已在录制中，跳过重复启动")
+            return False
+
         if not LEROBOT_AVAILABLE or not self.leader_arm:
             print("⚠️  主臂硬件不可用")
             return False
@@ -540,6 +640,7 @@ class ProcessManager:
         def record_loop():
             interval = CONFIG.get('hardware.record_interval_ms', 100) / 1000.0
             frame_count = 0
+            MOVE_THRESHOLD = 12
             while self.recording_gestures and not EXIT_EVENT.is_set():
                 try:
                     if not self.leader_arm.connected:
@@ -549,6 +650,13 @@ class ProcessManager:
 
                     angles = self.leader_arm.read_angles()
                     if angles:
+                        if self.gesture_recorder.current_recording:
+                            last_angles = self.gesture_recorder.current_recording[-1]['angles']
+                            total_diff = sum(abs(a - b) for a, b in zip(angles, last_angles))
+                            if total_diff < MOVE_THRESHOLD:
+                                time.sleep(interval)
+                                continue
+                        
                         self.gesture_recorder.record_gesture(angles, f"frame_{frame_count}")
                         frame_count += 1
 
@@ -569,7 +677,11 @@ class ProcessManager:
         return True
 
     def cleanup(self):
-        """清理钩子：程序退出时调用"""
+        """清理钩子：程序退出时调用
+        【P0修复 问题4】增强退出逻辑，确保回放被中断，减少串口僵死风险"""
+        # 【关键】立即发送全局停止信号，中断任何正在进行的回放
+        STOP_SIGNAL.set()
+        
         self.stop_recording()
         if self.gesture_recorder:
             print(f"📊 共记录 {self.gesture_recorder.get_count()} 个姿态")
@@ -577,14 +689,9 @@ class ProcessManager:
         # 【舵机过载保护】尝试释放所有舵机的力矩，即使某个舵机已过载也不中断清理流程
         if self.leader_arm and self.leader_arm.connected:
             try:
-                # 从高关节往低关节逐个释放力矩（地址 40 写入 0），防止上层塌落
-                for motor_id in reversed(range(1, 7)):
-                    try:
-                        self.leader_arm.bus._write(40, 0, motor_id)  # 正确参数顺序
-                    except Exception as e:
-                        # 某个舵机可能已过载，记录但继续释放其他舵机
-                        print(f"⚠️  释放电机 {motor_id} 力矩时出错（可能已过载）: {e}")
-                        continue
+                # 使用统一的 set_torque 方法释放所有舵机
+                self.leader_arm.set_torque(False)
+                print("✅ 主臂所有舵机已释放")
             except Exception as e:
                 print(f"⚠️  清理舵机力矩时出错: {e}")
 
@@ -601,6 +708,20 @@ pm = ProcessManager()
 # ==========================================
 # 机器人指令处理器
 # ==========================================
+def keyboard_listener():
+    """手动按键激活（汇报演示防尴尬神器）"""
+    try:
+        import keyboard
+        print("💡 提示：演示中若噪音太大，可按 [Space] 强制激活监听")
+        while not EXIT_EVENT.is_set():
+            if keyboard.is_pressed('space'):
+                pm.activate(reason="手动按键")
+                time.sleep(1)  # 防抖
+            time.sleep(0.1)
+    except ImportError:
+        pass
+
+
 def robot_worker():
     """
     【关键修复】处理机器人指令队列
@@ -641,28 +762,57 @@ def robot_worker():
                 pm.start_recording()
             elif action == 'RECORD_STOP':
                 pm.stop_recording()
+                pm.operation_mode = None
+                pm.activate(reason="采集结束")
+                pm.waiting_for_naming = True
+                tts.speak("录制已停止，请说命名为加上名字来保存动作")
             elif action == 'GESTURE_RECORD':
                 pm.record_gesture_from_leader(label=text)
             elif action == 'GESTURE_START':
                 pm.start_gesture_recording()
             elif action == 'GESTURE_STOP':
                 pm.stop_gesture_recording()
+                pm.operation_mode = None
+                pm.activate(reason="录制结束")
+                pm.waiting_for_naming = True
+                tts.speak("录制已停止并保存。现在请说命名为加上名字，例如命名为挥手，来给动作起名。")
+
+            elif action == '__PLAYBACK__':
+                target = (cmd.get('target') or '').strip()
+                if not target:
+                    tts.speak("没有听清要执行的动作名字")
+                    continue
+
+                if not pm.gesture_recorder or not pm.gesture_recorder.library:
+                    tts.speak("动作库为空，请先录制并命名")
+                    continue
+
+                names = list(pm.gesture_recorder.library.keys())
+                if target in pm.gesture_recorder.library:
+                    selected = target
+                else:
+                    matched = difflib.get_close_matches(target, names, n=1, cutoff=0.6)
+                    if not matched:
+                        tts.speak("动作库里没有这个名字")
+                        continue
+                    selected = matched[0]
+
+                tts.speak(f"正在执行{selected}")
+                threading.Thread(target=pm.execute_action, args=(selected,), daemon=True).start()
 
             # 【新增】机械臂实时控制逻辑（使用 safe_write 保护）
             elif action == 'PICK':
                 try:
                     print("🦾 执行实时抓取动作 (6 号舵机)...")
-                    # 【优化】异步TTS反馈，不阻塞动作执行
                     threading.Thread(target=lambda: tts.speak("收到抓取指令"), daemon=True).start()
+                    pick_pos = int(CONFIG.get('hardware.gripper_pick_pos', 2600))
 
                     if pm.leader_arm and pm.leader_arm.connected:
-                        # 【关键】实时反馈机制：读取当前位置
                         current_angles = pm.leader_arm.read_angles()
                         if current_angles:
                             print(f"🔍 调试: 6号舵机当前位置 {current_angles[5]} (范围: 1000-2800)")
 
-                        # 执行抓取：使用 safe_write 确保在安全范围内
-                        pm.leader_arm.safe_write(6, 2800)  # 闭合位置（安全范围内）
+                        pm.leader_arm.safe_write(6, pick_pos)
                         print("✅ 抓取动作已执行")
                     else:
                         print("⚠️  主臂未连接，无法执行抓取")
@@ -676,14 +826,14 @@ def robot_worker():
                 try:
                     print("🦾 执行实时放下动作 (6 号舵机)...")
                     threading.Thread(target=lambda: tts.speak("收到放下指令"), daemon=True).start()
+                    place_pos = int(CONFIG.get('hardware.gripper_place_pos', 1600))
 
                     if pm.leader_arm and pm.leader_arm.connected:
                         current_angles = pm.leader_arm.read_angles()
                         if current_angles:
                             print(f"🔍 调试: 6号舵机当前位置 {current_angles[5]} (范围: 1000-2800)")
 
-                        # 执行放下：使用 safe_write 确保在安全范围内
-                        pm.leader_arm.safe_write(6, 1000)  # 打开位置（安全范围内）
+                        pm.leader_arm.safe_write(6, place_pos)
                         print("✅ 放下动作已执行")
                     else:
                         print("⚠️  主臂未连接，无法执行放下")
@@ -692,6 +842,54 @@ def robot_worker():
                 except Exception as e:
                     print(f"⚠️  放下动作执行失败: {e}")
                     threading.Thread(target=lambda: tts.speak("操作执行遇到异常"), daemon=True).start()
+
+            elif action == 'FOLLOWER_PICK':
+                try:
+                    pick_pos = int(CONFIG.get('hardware.follower_gripper_pick_pos', CONFIG.get('hardware.gripper_pick_pos', 2600)))
+                    if pm.follower_arm is None:
+                        print("❌ 从臂对象未初始化")
+                        tts.speak("从臂硬件未初始化")
+                    elif 6 not in getattr(pm.follower_arm, 'available_motors', [1, 2, 3, 4, 5, 6]):
+                        print("⚠️ 从臂 6 号舵机缺失，无法抓取")
+                        tts.speak("检测到从臂夹爪掉线，无法执行")
+                    elif not pm.follower_arm.connected:
+                        print(f"⚠️ 从臂未连接 ({pm.follower_arm.port})，尝试重连...")
+                        if pm.follower_arm.connect():
+                            print("✅ 从臂重连成功")
+                            pm.follower_arm.safe_write(6, pick_pos)
+                            print("✅ 从臂执行：抓取")
+                        else:
+                            tts.speak("从臂连接失败")
+                    else:
+                        pm.follower_arm.safe_write(6, pick_pos)
+                        print("✅ 从臂执行：抓取")
+                except Exception as e:
+                    print(f"⚠️ 从臂抓取异常: {e}")
+                    tts.speak("从臂操作异常")
+
+            elif action == 'FOLLOWER_PLACE':
+                try:
+                    place_pos = int(CONFIG.get('hardware.follower_gripper_place_pos', CONFIG.get('hardware.gripper_place_pos', 1600)))
+                    if pm.follower_arm is None:
+                        print("❌ 从臂对象未初始化")
+                        tts.speak("从臂硬件未初始化")
+                    elif 6 not in getattr(pm.follower_arm, 'available_motors', [1, 2, 3, 4, 5, 6]):
+                        print("⚠️ 从臂 6 号舵机缺失，无法放下")
+                        tts.speak("检测到从臂夹爪掉线，无法执行")
+                    elif not pm.follower_arm.connected:
+                        print(f"⚠️ 从臂未连接 ({pm.follower_arm.port})，尝试重连...")
+                        if pm.follower_arm.connect():
+                            print("✅ 从臂重连成功")
+                            pm.follower_arm.safe_write(6, place_pos)
+                            print("✅ 从臂执行：放下")
+                        else:
+                            tts.speak("从臂连接失败")
+                    else:
+                        pm.follower_arm.safe_write(6, place_pos)
+                        print("✅ 从臂执行：放下")
+                except Exception as e:
+                    print(f"⚠️ 从臂放下异常: {e}")
+                    tts.speak("从臂操作异常")
 
             elif action == 'JOINT_CONTROL':
                 """
@@ -765,36 +963,44 @@ def robot_worker():
                     threading.Thread(target=lambda: tts.speak("关节控制异常"), daemon=True).start()
 
             elif action == 'ARM_RELAX':
-                """进入示教模式：释放所有舵机力矩"""
                 try:
-                    print("🧘 进入示教模式，释放所有舵机...")
-                    threading.Thread(target=lambda: tts.speak("已进入示教模式，可以手动拖动"), daemon=True).start()
+                    pm.operation_mode = 'teaching'
+                    pm.activate(reason="进入示教模式")
 
-                    if pm.leader_arm and pm.leader_arm.connected:
-                        for motor_id in range(1, 7):
-                            try:
-                                pm.leader_arm.bus._write(40, 0, motor_id)
-                            except Exception:
-                                pass
-                        print("✅ 所有舵机已释放，可进行手动拖动")
-                    else:
-                        print("⚠️  主臂未连接")
+                    if pm.process is not None:
+                        pm.stop_recording()
+                        time.sleep(0.5)
+
+                    if not (pm.leader_arm and pm.leader_arm.connected):
+                        pm.operation_mode = None
+                        tts.speak("主臂未连接")
+                        continue
+
+                    tts.speak("已进入示教模式，主臂已变软。请用手拖动主臂完成你想要的动作，完成后说停止录制，系统会提示你命名。")
+
+                    def safe_torque_off():
+                        try:
+                            pm.leader_arm.set_torque(False)
+                            pm.start_gesture_recording()
+                        except Exception as hw_error:
+                            print(f"⚠️ 硬件告警: {hw_error}")
+
+                    threading.Thread(target=safe_torque_off, daemon=True).start()
 
                 except Exception as e:
-                    print(f"⚠️  进入示教模式失败: {e}")
+                    pm.operation_mode = None
+                    print(f"⚠️ 示教启动异常: {e}")
 
             elif action == 'ARM_LOCK':
                 """退出示教模式：锁定所有舵机力矩"""
                 try:
+                    pm.operation_mode = None
+                    pm.activate(reason="退出示教模式")
                     print("🔒 锁定所有舵机...")
                     threading.Thread(target=lambda: tts.speak("已锁定机械臂"), daemon=True).start()
 
                     if pm.leader_arm and pm.leader_arm.connected:
-                        for motor_id in range(1, 7):
-                            try:
-                                pm.leader_arm.bus._write(40, 1, motor_id)
-                            except Exception:
-                                pass
+                        pm.leader_arm.set_torque(True)
                         print("✅ 所有舵机已锁定")
                     else:
                         print("⚠️  主臂未连接")
@@ -803,34 +1009,61 @@ def robot_worker():
                     print(f"⚠️  锁定舵机失败: {e}")
 
             elif action == 'STOP':
+                """【深水区优化】增强型紧急停止逻辑
+                1. 全局广播: 立即触发 STOP_SIGNAL
+                2. 双臂释放: leader_arm + follower_arm 所有舵机
+                3. 时序同步: 缓冲时间确保回放线程捕捉到中断信号
+                4. 复位: STOP_SIGNAL.clear() 为下一轮准备"""
                 try:
-                    print("🛑 紧急停止：释放所有舵机力矩...")
+                    print("🛑 紧急停止：全局广播中断信号...")
+                    # 【第一步】立即发送全局停止信号
+                    STOP_SIGNAL.set()
                     threading.Thread(target=lambda: tts.speak("已紧急停止"), daemon=True).start()
 
+                    # 【第二步】释放主臂所有舵机 (1-6)
                     if pm.leader_arm and pm.leader_arm.connected:
-                        # 逐个释放舵机，忽略过载错误
-                        for motor_id in range(1, 7):
-                            try:
-                                pm.leader_arm.bus._write(40, 0, motor_id)
-                            except Exception:
-                                pass  # 过载舵机可能无法释放，忽略
-                        print("✅ 所有舵机已释放")
-                    else:
-                        print("⚠️  主臂未连接，无法释放舵机")
+                        print("📍 释放主臂舵机力矩...")
+                        pm.leader_arm.set_torque(False)
+                        print("✅ 主臂舵机已释放")
+                    
+                    # 【第三步】释放从臂所有舵机 (1-6) - 新增支持
+                    if pm.follower_arm and pm.follower_arm.connected:
+                        print("📍 释放从臂舵机力矩...")
+                        pm.follower_arm.set_torque(False)
+                        print("✅ 从臂舵机已释放")
+                    
+                    # 【第四步】时序同步：给回放线程足够窗口期捕捉中断信号
+                    # 原理：safe_playback 每帧 40ms，0.15s 缓冲可覆盖 3-4 帧采样
+                    print("⏱️  同步等待回放线程退出...")
+                    time.sleep(0.15)
+                    
+                    # 【第五步】清除停止信号，为下一轮做准备
+                    STOP_SIGNAL.clear()
+                    print("✅ 系统已完全停止并复位")
 
                 except Exception as e:
                     print(f"⚠️  释放舵机失败: {e}")
                     threading.Thread(target=lambda: tts.speak("释放操作失败"), daemon=True).start()
+                    # 即使异常也尝试清除信号
+                    try:
+                        STOP_SIGNAL.clear()
+                    except:
+                        pass
             
-            # 【新增】命名动作的存储与回放（基于 text 内容而非 action）
-            if "命名为" in text:
-                """根据语音指令保存主臂录制的动作"""
+            elif "命名为" in text:
                 try:
                     name = text.split("命名为")[-1].strip().replace("。", "").replace("！", "")
                     if not name:
                         tts.speak("没有听清动作名字")
                     elif pm.gesture_recorder and pm.gesture_recorder.save_named_action(name):
+                        pm.waiting_for_naming = False
+                        pm.operation_mode = None
+                        pm.stop_gesture_recording()
+                        if pm.leader_arm and pm.leader_arm.connected:
+                            pm.leader_arm.set_torque(True)
+                        pm.activate(reason="命名完成")
                         tts.speak(f"已存入动作库，名字是{name}")
+                        tts.speak(f"你现在可以说执行{name}让二号臂复现了。")
                         print(f"✅ 动作已保存: {name}")
                     else:
                         tts.speak("保存动作失败")
@@ -839,16 +1072,19 @@ def robot_worker():
                     print(f"⚠️  保存动作失败: {e}")
                     tts.speak("保存出错")
             
-            if "执行" in text and action is None:
-                """根据语音指令执行从臂上的命名动作"""
+            elif "执行" in text:
+                """【深水区优化】根据语音指令异步执行从臂上的命名动作
+                改进：直接用正则匹配提取目标名，不受 action 值影响
+                架构优化：使用独立线程执行，防止主循环被硬件 IO 阻塞"""
                 try:
                     target = text.split("执行")[-1].strip().replace("。", "").replace("！", "")
                     if not target:
                         tts.speak("没有听清要执行的动作名字")
                     elif pm.gesture_recorder:
                         # 先尝试精确匹配
+                        action_to_execute = None
                         if target in pm.gesture_recorder.library:
-                            pm.execute_action(target)
+                            action_to_execute = target
                         else:
                             # 模糊匹配（仅当相似度足够高时）
                             matches = difflib.get_close_matches(
@@ -858,9 +1094,22 @@ def robot_worker():
                                 cutoff=0.75
                             )
                             if matches:
-                                pm.execute_action(matches[0])
-                            else:
-                                tts.speak(f"动作库里没有{target}这个名字")
+                                action_to_execute = matches[0]
+                        
+                        if action_to_execute:
+                            # 【核心优化】异步执行：启动独立线程，主循环立即继续监听
+                            def async_playback(name):
+                                pm.execute_action(name)
+                            
+                            playback_thread = threading.Thread(
+                                target=async_playback, 
+                                args=(action_to_execute,), 
+                                daemon=True
+                            )
+                            playback_thread.start()
+                            print(f"🎬 已启动异步回放线程: {action_to_execute}")
+                        else:
+                            tts.speak(f"动作库里没有{target}这个名字")
                     else:
                         tts.speak("动作库不可用")
                         
@@ -1048,22 +1297,134 @@ def on_close(ws, close_status_code, close_msg):
 
 
 # ==========================================
-# 统一的指令解析与入队逻辑
+# 统一的指令解析与入队逻辑（三层过滤架构）
 # ==========================================
 def process_final_text(text):
-    """统一的指令解析与入队逻辑"""
-    action, score = matcher.match(text)
+    global pm
+    
+    clean_text = text.strip().replace('。', '').replace('？', '').replace('！', '')
+
+    if pm.waiting_for_naming:
+        if "命名为" not in clean_text:
+            tts.speak("请说命名为加上名字")
+            return
+        name = clean_text.split("命名为", 1)[-1].strip()
+        if not name or len(name) < 1:
+            tts.speak("没有听清名字，请再说一次命名为加上名字")
+            return
+        try:
+            if pm.gesture_recorder and pm.gesture_recorder.save_named_action(name):
+                pm.waiting_for_naming = False
+                tts.speak(f"动作已保存，名字是{name}。你可以说执行{name}让从臂复现这个动作。")
+                print(f"✅ 动作已命名并保存: {name}")
+            else:
+                tts.speak("没有找到录制数据，请先录制再命名")
+                pm.waiting_for_naming = False
+        except Exception as e:
+            print(f"⚠️ 命名失败: {e}")
+            tts.speak("保存失败，请重试")
+            pm.waiting_for_naming = False
+        return
+    
+    # 口音硬纠正（方言/误识别补丁）
+    ACCENT_FIX = {
+        "腹壁": "从臂", "腹b": "从臂", "从b": "从臂", "2b": "从臂",
+        "铜币": "从臂", "务必": "从臂", "虫币": "从臂",
+        "试驾": "示教", "支教": "示教", "日教": "示教", "自觉": "示教",
+        "睡觉": "示教", "是叫": "示教",
+        "开启指令": "开始指令", "开启录制": "开始录制",
+        "开始试教": "示教模式",
+        "卟哔": "", "卟哔卟哔": ""
+    }
+    for wrong, right in ACCENT_FIX.items():
+        if wrong in clean_text:
+            clean_text = clean_text.replace(wrong, right)
+            print(f"🔧 口音纠正: '{wrong}' → '{right}'")
+
+    if any(word in clean_text for word in ["不", "别", "取消"]):
+        print(f"🛑 否定语义拦截: {clean_text}")
+        return
+    
+    # Whisper 补位：讯飞异常时纠正
+    if WHISPER_AVAILABLE and pm.whisper_model and (len(clean_text) > 16 or "腹壁" in clean_text or "从b" in clean_text):
+        temp_wav = "temp_recording.wav"
+        if os.path.exists(temp_wav):
+            print(f"🔍 讯飞结果 [{clean_text}] 异常，Whisper 介入...")
+            try:
+                result = pm.whisper_model.transcribe(temp_wav, language='zh')
+                whisper_text = result['text'].strip()
+                if len(whisper_text) > 1 and whisper_text != clean_text:
+                    print(f"✅ Whisper 纠正为: {whisper_text}")
+                    clean_text = whisper_text
+            except Exception as e:
+                print(f"⚠️  Whisper 纠正失败: {e}")
+    
+    if len(clean_text) < 2 or len(clean_text) > 20:
+        return
+
+    # 过滤乱码（汉字占比必须超过60%）
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fa5]', clean_text))
+    if chinese_chars / max(len(clean_text), 1) < 0.6:
+        print(f"🤫 [字符过滤] 疑似背景噪音: {clean_text}")
+        return
+
+    # --- 第二层：唤醒词检测 ---
+    # 【P0修复 问题5】不应该 return，而是清洗唤醒词后继续处理
+    if any(word in clean_text for word in pm.WAKE_WORDS):
+        pm.activate(reason="语音唤醒")
+        # 擦除唤醒词部分，继续处理后续指令
+        for wake_word in pm.WAKE_WORDS:
+            if wake_word in clean_text:
+                clean_text = clean_text.replace(wake_word, "").strip()
+                break
+        # 如果清洗后没有内容，则返回
+        if not clean_text or len(clean_text) < 2:
+            return
+    
+    # --- 第三层：状态检查与指令匹配 ---
+    if not pm.is_active:
+        print(f"😴 [待机中] 忽略: {clean_text}")
+        return
+
+    if "执行" in clean_text:
+        target = clean_text.split("执行", 1)[-1].strip()
+        if not target:
+            tts.speak("没有听清要执行的动作名字")
+            return
+        pm.activate(reason="动态执行")
+        try:
+            ROBOT_QUEUE.put_nowait({
+                'action': '__PLAYBACK__',
+                'text': clean_text,
+                'target': target,
+                'score': 1.0
+            })
+        except Exception:
+            pass
+        return
+
+    # 尝试匹配 commands.yaml 中的指令
+    action, score = matcher.match(clean_text)
+    
     if action:
-        print(f"🎯 指令匹配: {action} (置信度: {score:.2f})")
+        # 成功匹配后重置计时器
+        pm.activate(reason="指令重置")
+        
+        print(f"🎯 匹配指令: {action} (得分: {score:.2f})")
         tts_feedback = matcher.get_tts_feedback(action)
         if tts_feedback:
             tts.speak(tts_feedback)
+            
         try:
-            ROBOT_QUEUE.put_nowait({'action': action, 'text': text, 'score': score})
+            ROBOT_QUEUE.put_nowait({
+                'action': action, 
+                'text': clean_text, 
+                'score': score
+            })
         except Exception:
             pass
     else:
-        print(f"⚠️  未能识别指令: {text}")
+        print(f"⚠️ 未能识别指令: {clean_text}")
 
 
 def on_open(ws):
@@ -1229,10 +1590,25 @@ def run(device_id):
         print(f"✅ 硬件已连接")
     else:
         print(f"⚠️  主臂硬件模块不可用")
+    
+    if pm.follower_arm and not pm.follower_arm.connected:
+        print(f"\n🔗 正在连接从臂 (Port: {pm.follower_arm.port})...")
+        if pm.follower_arm.connect():
+            print(f"✅ 从臂连接已建立 (Port: {pm.follower_arm.port})")
+        else:
+            print(f"⚠️  从臂连接失败，请检查端口 {pm.follower_arm.port} 及 12V 电源")
+    elif pm.follower_arm and pm.follower_arm.connected:
+        print(f"✅ 从臂已连接 (Port: {pm.follower_arm.port})")
+    else:
+        print(f"⚠️  从臂硬件模块不可用")
 
     # 启动机器人指令处理线程
     worker = threading.Thread(target=robot_worker, daemon=True)
     worker.start()
+
+    # 【可选】启动键盘监听线程（用于演示中的防噪音激活）
+    kbd_thread = threading.Thread(target=keyboard_listener, daemon=True)
+    kbd_thread.start()
 
     # WebSocket 重连循环
     consecutive_errors = 0
@@ -1275,10 +1651,16 @@ def run(device_id):
     except Exception as e:
         print(f"\n❌ 主循环异常: {e}")
     finally:
+        # 【P0修复 问题4】优雅退出：先设置停止信号再关闭
+        STOP_SIGNAL.set()
         EXIT_EVENT.set()
         stream.stop()
         stream.close()
-        worker.join(timeout=2)
+        # 【改进】加长超时时间，给 worker 充分机会响应中断信号
+        print("⏳ 等待机械臂回放中断（最多 3s）...")
+        worker.join(timeout=3)
+        if worker.is_alive():
+            print("⚠️  robot_worker 未完全退出，但继续清理...")
         pm.cleanup()
         print("✅ 已停止")
 
