@@ -25,23 +25,23 @@ graph TD
     classDef Fix fill:#FFEBEE,stroke:#B71C1C,stroke-width:1px,rx:10,ry:10;
 
     %% 1. Cognition Layer
-    subgraph Cognition[<b>Layer 1: COGNITION (AI & Perception)</b><br/>voice_robot.py, llm_reasoner.py]
+    subgraph Cognition ["Layer 1: COGNITION (AI & Perception)"]
         direction TB
-        Mic[Microphone Input] --> VAD[<b>Local VAD & Calibration</b><br/>audio_callback(), calibrate_mic()]
+        Mic[Microphone Input] --> VAD["Local VAD & Calibration"]
         VAD -- Valid Audio --> STT{STT Engine}
         STT -- Online --> iFly[iFlytek WS API]
-        STT -- Local Fallback --> Whisper[WhisperEngine<br/>(openai-whisper)]
+        STT -- Local Fallback --> Whisper[WhisperEngine]
         
-        iFly & Whisper -- Spoken Text --> Reasoner[<b>LLM Reasoner</b><br/>llm_reasoner.py]
-        Yaml[commands.yaml<br/>(Configs/Keywords)] -. Fuzzy Match .-> Reasoner
+        iFly & Whisper -- Spoken Text --> Reasoner[LLM Reasoner]
+        Yaml[commands.yaml] -. Fuzzy Match .-> Reasoner
     end
 
     %% 2. Control Layer
-    subgraph Control[<b>Layer 2: CONTROL (ROS 2 & Dispatch)</b><br/>voice_robot.py, tf_node.py]
+    subgraph Control ["Layer 2: CONTROL (ROS 2 & Dispatch)"]
         direction TB
-        Queue[<b>Mission Queue</b><br/>ROBOT_QUEUE]
-        Dispatcher[<b>Mission Dispatcher</b><br/>robot_worker()]
-        ROS2Node[<b>ROS 2 TF Node</b><br/>tf_node.py]
+        Queue["Mission Queue (ROBOT_QUEUE)"]
+        Dispatcher["Mission Dispatcher"]
+        ROS2Node["ROS 2 TF Node (tf_node.py)"]
         
         Reasoner -- JSON Intent --> Queue
         Queue --> Dispatcher
@@ -49,17 +49,17 @@ graph TD
     end
 
     %% 3. Execution Layer
-    subgraph Execution[<b>Layer 3: EXECUTION (Hardware & Data)</b><br/>lerobot_hardware.py]
+    subgraph Execution ["Layer 3: EXECUTION (Hardware & Data)"]
         direction TB
-        HWInterface[<b>Hardware Interface</b><br/>SO101LeaderArm]
-        Serial[Serial Comm<br/>(SCServo SDK)]
+        HWInterface[Hardware Interface]
+        Serial[Serial Comm]
         Arm[SO-101 Leader Arm]
         
-        Recorder[<b>Gesture Recorder</b><br/>GestureRecorder]
+        Recorder[Gesture Recorder]
         
-        subgraph Fixes[v2.1 Stability Fixes]
-            Overload[Overload Protection<br/>clear_overload_error()]
-            Smooth[Smooth Startup<br/>approach_steps]
+        subgraph Fixes ["v2.1 Stability Fixes"]
+            Overload[Overload Protection]
+            Smooth[Smooth Startup]
         end
         
         HWInterface --> Serial
@@ -73,7 +73,7 @@ graph TD
     Arm -. Feedback .-> ROS2Node
     
     %% VLA Data Pipeline
-    Recorder -. Export .-> VLA[<b>VLA Dataset Ready</b><br/>(JSON/CSV for Training)]
+    Recorder -. Export .-> VLA["VLA Dataset Ready"]
 
     %% Styling Application
     class Cognition,Mic,VAD,STT,iFly,Whisper,Reasoner,Yaml Cognition;
