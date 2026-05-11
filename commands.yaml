@@ -1,201 +1,233 @@
 # ==========================================
 # Voice-Robot 指令配置文件
-# 用途：定义机器人动作、方言关键词、参数
 # ==========================================
 
 # 基础配置
 robot:
   name: "SO-101 LeRobot Arm"
   description: "Remote operation data collection for LeRobot"
-  
+
 # 语音识别配置
 speech:
-  engine: "ifly"  # iFlytek 讯飞
+  engine: "ifly"
   language: "zh_cn"
-  accent: "mandarin"  # 改为普通话，大幅提升非上海话识别率
-  vad_eos: 1500  # 句子结束检测时间(ms)
+  accent: "mandarin"
+  channels: 1
+  sample_rate: 16000
+  chunk_ms: 80
+  vad_eos: 2000
   confidence_threshold: 0.12
-  fuzzy_match_threshold: 0.8  # 略微提高阈值以过滤干扰
-  
-# 指令定义（动作树）
+  fuzzy_match_threshold: 0.75
+
+llm:
+  enabled: true
+  intercept_all: false
+
+# 指令定义
 commands:
-  # 抓取动作
   PICK:
     description: "拿起物体"
     keywords:
-      - "抓取"
-      - "拿起来"
-      - "握紧"
-      - "抓一下"
-      - "拿"
-      - "抓"
+      - "主臂抓取"
+      - "主臂拿起"
+      - "一号抓取"
+      - "主臂握紧"
     tts_feedback: "已收到拿起指令"
     action_type: "manipulate"
-    timeout: 30  # 秒
+    timeout: 30
 
-  # 放下动作
   PLACE:
     description: "放下物体"
     keywords:
-      - "放下"
-      - "放开"
-      - "松开"
-      - "放一下"
-      - "放"
-      - "下"
+      - "主臂放下"
+      - "主臂放开"
+      - "主臂松开"
+      - "放下物体"
     tts_feedback: "已收到放下指令"
     action_type: "manipulate"
     timeout: 30
 
-  # 停止动作
   STOP:
     description: "停止一切动作"
     keywords:
       - "停止"
-      - "放松"
-      - "释放"
-      - "停一下"
-      - "别动"
+      - "紧急停止"
+      - "停止所有动作"
+      - "停下"
     tts_feedback: "已停止所有动作"
     action_type: "emergency"
     timeout: 5
 
-  # 【新增】调试模式：进入示教状态（主臂松弛）
   ARM_RELAX:
-    description: "进入调试/示教模式，松开机械臂力矩"
+    description: "进入示教模式"
     keywords:
       - "进入调试"
       - "示教模式"
+      - "试驾模式"
+      - "支教模式"
+      - "日教模式"
+      - "自觉模式"
       - "松开机械臂"
-      - "放松"
-      - "手动拖动"
-    tts_feedback: "已进入示教模式，可以手动拖动"
+      - "释放机械臂"
+      - "开始学习"
+      - "手动模式"
+      - "拖动模式"
+      - "市调模式"
+      - "市郊模式"
+      - "视角模式"
+    tts_feedback: "已进入示教模式，主臂已释放力矩"
     action_type: "debug"
     timeout: 300
 
-  # 【新增】调试模式：退出示教状态（主臂锁定）
   ARM_LOCK:
-    description: "退出调试/示教模式，锁定机械臂力矩"
+    description: "锁定机械臂"
     keywords:
       - "退出调试"
       - "锁定机械臂"
       - "停止示教"
-      - "锁定"
     tts_feedback: "已锁定机械臂"
     action_type: "debug"
     timeout: 5
-  
-  # 【新增】故障恢复：重启舵机 6
-  RESET_GRIPPER:
-    description: "重启6号舵机（夹持器）并恢复连接"
-    keywords:
-      - "重启夹持器"
-      - "重置舵机"
-      - "6号舵机重启"
-      - "修复舵机"
-      - "舵机重启"
-    tts_feedback: "正在重启夹持器"
-    action_type: "recovery"
-    timeout: 10
 
-  # 数据采集：开始记录
   RECORD_START:
     description: "开始采集遥操作数据"
     keywords:
       - "开始记录"
       - "开始采集"
-      - "开始录制"
-      - "开始测试"    # 新增：常见误识别词
-      - "开始测"      # 新增：简化版本
-      - "开始"        # 新增：通用触发词
-      - "录制"
-      - "开始录"
-      - "来一遍"
+      - "数据采集"
     tts_feedback: "开始记录遥操作数据"
     action_type: "data_collection"
-    timeout: 300  # 5分钟
+    timeout: 300
 
-  # 数据采集：停止记录
   RECORD_STOP:
     description: "停止采集遥操作数据"
     keywords:
       - "停止记录"
       - "结束记录"
       - "录好了"
-      - "存好"
-      - "存一下"
-      - "保存"
-      - "没有了"
+      - "停止数据采集"
+      - "采集结束"
     tts_feedback: "停止记录，数据已保存"
     action_type: "data_collection"
     timeout: 10
 
-  # 主臂：记录当前姿态
   GESTURE_RECORD:
-    description: "从主臂读取并记录当前姿态"
+    description: "记录主臂姿态"
     keywords:
       - "记录姿态"
       - "记一哈"
-      - "存一个"
-      - "保存动作"
-      - "哈这个"
+      - "记录动作"
+      - "存下来"
+      - "保存一下"
+      - "记下这个"
     tts_feedback: "已记录主臂姿态"
     action_type: "arm_control"
     timeout: 5
 
-  # 主臂：连续录制
   GESTURE_START:
     description: "开始连续录制主臂姿态"
     keywords:
-      - "开始录制"
-      - "连续记录"
-      - "启动录制"
-      - "来一遍"
-      - "保存一遍"
-    tts_feedback: "开始连续录制主臂姿态"
+      - "开启录制"
+      - "开始示教"
+      - "准备学习"
+      - "启动学习"
+    tts_feedback: "已准备好，请开始操作主臂"
     action_type: "arm_control"
     timeout: 300
 
-  # 主臂：停止录制
   GESTURE_STOP:
     description: "停止连续录制主臂姿态"
     keywords:
       - "停止录制"
       - "录好了"
-      - "完了"
-      - "结束"
-      - "保存完"
+      - "学完了"
+      - "停止识别"
+      - "结束识别"
+      - "结束录制"
+      - "好了"
     tts_feedback: "停止录制"
     action_type: "arm_control"
     timeout: 5
 
-# 环境变量覆盖（从 .env 读取，此处为默认值）
+  FOLLOWER_PICK:
+    description: "控制从臂抓取"
+    keywords:
+      - "从臂抓取"
+      - "副臂抓取"
+      - "腹壁抓取"
+      - "从b抓取"
+      - "腹b抓取"
+      - "2b抓取"
+      - "二号抓取"
+      - "启动抓取"
+    tts_feedback: "二号臂执行抓取"
+    action_type: "manipulate"
+    timeout: 30
+
+  FOLLOWER_PLACE:
+    description: "控制从臂放下"
+    keywords:
+      - "从臂放下"
+      - "副臂放下"
+      - "腹壁放下"
+      - "腹b放下"
+      - "从be放下"
+      - "二号放下"
+      - "启动放下"
+    tts_feedback: "二号臂执行放下"
+    action_type: "manipulate"
+    timeout: 30
+
+  VLA_DEMO:
+    description: "启动视觉演示/分析环境"
+    keywords:
+      - "启动视觉"
+      - "开启视觉"
+      - "分析环境"
+      - "视觉模式"
+    tts_feedback: "视觉系统已就绪，你可以说'帮我抓取小球'"
+    action_type: "vla_task"
+    timeout: 30
+
+  VISION_GRASP:
+    description: "视觉引导抓取指定目标"
+    keywords:
+      - "帮我抓取"
+      - "视觉抓取"
+      - "抓住那个"
+      - "抓那个"
+      - "识别后抓取"
+      - "帮我拿那个"
+    tts_feedback: "已请求视觉系统抓取目标"
+    action_type: "vision_task"
+    timeout: 30
+
+# 环境变量覆盖
 defaults:
-  app_id: "YOUR_APP_ID_HERE"
-  api_key: "YOUR_API_KEY_HERE"
-  api_secret: "YOUR_API_SECRET_HERE"
+  app_id: "${IFLY_APP_ID}"
+  api_key: "${IFLY_API_KEY}"
+  api_secret: "${IFLY_API_SECRET}"
   sample_rate: 16000
-  channels: 2
-  chunk_ms: 80
-  
+
 # 日志与输出
 logging:
   log_file: "commands.log"
   cmd_json: "last_command.json"
   lerobot_log: "lerobot_runtime.log"
-  
-# LeRobot 集成（后续扩展）
+
+# LeRobot 集成
 lerobot:
   enabled: true
   env_name: "lerobot"
   robot_path: "lerobot/configs/robot/so_101"
-  script_path: "lerobot/scripts/control_robot.py"
 
-# 硬件配置（主臂/从臂控制）
+# 硬件配置
 hardware:
-  leader_port: "COM12"              # 主臂（Leader）串口
-  leader_baudrate: 115200            # 主臂波特率
-  follower_port: "COM13"             # 从臂（Follower）串口（可选）
-  record_interval_ms: 100            # 连续记录间隔（毫秒）
-  calib_file: null                   # 校准文件路径（自动识别）
-
+  leader_port: "COM12"
+  leader_baudrate: 115200
+  follower_port: "COM11"
+  record_interval_ms: 100
+  gripper_pick_pos: 2600
+  gripper_place_pos: 1600
+  follower_gripper_pick_pos: 2600
+  follower_gripper_place_pos: 1600
