@@ -12,9 +12,16 @@ speech:
   engine: "ifly"
   language: "zh_cn"
   accent: "mandarin"
+  channels: 1
+  sample_rate: 16000
+  chunk_ms: 80
   vad_eos: 2000
   confidence_threshold: 0.12
   fuzzy_match_threshold: 0.75
+
+llm:
+  enabled: true
+  intercept_all: false
 
 # 指令定义
 commands:
@@ -44,10 +51,9 @@ commands:
     description: "停止一切动作"
     keywords:
       - "停止"
-      - "放松"
-      - "释放"
       - "紧急停止"
       - "停止所有动作"
+      - "停下"
     tts_feedback: "已停止所有动作"
     action_type: "emergency"
     timeout: 5
@@ -63,6 +69,12 @@ commands:
       - "自觉模式"
       - "松开机械臂"
       - "释放机械臂"
+      - "开始学习"
+      - "手动模式"
+      - "拖动模式"
+      - "市调模式"
+      - "市郊模式"
+      - "视角模式"
     tts_feedback: "已进入示教模式，主臂已释放力矩"
     action_type: "debug"
     timeout: 300
@@ -129,9 +141,14 @@ commands:
       - "停止录制"
       - "录好了"
       - "学完了"
+      - "停止识别"
+      - "结束识别"
+      - "结束录制"
+      - "好了"
     tts_feedback: "停止录制"
     action_type: "arm_control"
     timeout: 5
+
   FOLLOWER_PICK:
     description: "控制从臂抓取"
     keywords:
@@ -154,17 +171,42 @@ commands:
       - "副臂放下"
       - "腹壁放下"
       - "腹b放下"
+      - "从be放下"
       - "二号放下"
       - "启动放下"
     tts_feedback: "二号臂执行放下"
     action_type: "manipulate"
     timeout: 30
 
+  VLA_DEMO:
+    description: "启动视觉演示/分析环境"
+    keywords:
+      - "启动视觉"
+      - "开启视觉"
+      - "分析环境"
+      - "视觉模式"
+    tts_feedback: "视觉系统已就绪，你可以说'帮我抓取小球'"
+    action_type: "vla_task"
+    timeout: 30
+
+  VISION_GRASP:
+    description: "视觉引导抓取指定目标"
+    keywords:
+      - "帮我抓取"
+      - "视觉抓取"
+      - "抓住那个"
+      - "抓那个"
+      - "识别后抓取"
+      - "帮我拿那个"
+    tts_feedback: "已请求视觉系统抓取目标"
+    action_type: "vision_task"
+    timeout: 30
+
 # 环境变量覆盖
 defaults:
-  app_id: "YOUR_APP_ID_HERE"
-  api_key: "YOUR_API_KEY_HERE"
-  api_secret: "YOUR_API_SECRET_HERE"
+  app_id: "${IFLY_APP_ID}"
+  api_key: "${IFLY_API_KEY}"
+  api_secret: "${IFLY_API_SECRET}"
   sample_rate: 16000
 
 # 日志与输出
@@ -181,12 +223,17 @@ lerobot:
 
 # 硬件配置
 hardware:
-  leader_port: "COM12"
-  leader_baudrate: 115200
-  follower_port: "COM11"
+  leader_port: "/dev/leader_arm"
+  leader_port_linux: "/dev/ttyACM1"
+  leader_port_windows: "COM12"
+  follower_port: "/dev/follower_arm"
+  follower_port_linux: "/dev/ttyACM0"
+  follower_port_windows: "COM11"
+  baudrate: 1000000
+  leader_baudrate: 1000000
+  follower_baudrate: 1000000
   record_interval_ms: 100
   gripper_pick_pos: 2600
   gripper_place_pos: 1600
   follower_gripper_pick_pos: 2600
   follower_gripper_place_pos: 1600
-
