@@ -135,15 +135,9 @@ If a real key was ever committed:
 
 ```bash
 pip install git-filter-repo
-git filter-repo --replace-text <(echo 'sk-xxxxxx==>REMOVED')
+git filter-repo --replace-text <(echo 'YOUR_LEAKED_KEY_HERE==>REMOVED')
 git push --force --all
 git push --force --tags
-```
-
-Replace `sk-xxxxxx` with your leaked key pattern, for example:
-
-```bash
-git filter-repo --replace-text <(echo 'YOUR_LEAKED_KEY_HERE==>REMOVED')
 ```
 
 > Note: closing security alerts without revoking/rotating the key does not sufficiently address the issue.
