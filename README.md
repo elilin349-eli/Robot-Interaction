@@ -125,6 +125,23 @@ pip install -r requirements.txt
 3. **Setup Keys:**
 Copy `env.example` to `.env`, then update your iFlytek and LLM API credentials in `.env` only (do not commit `.env`).
 
+### Secret Leak Emergency Handling
+
+If a real key was ever committed:
+
+1. Revoke the exposed key immediately and create a new one.
+2. Replace all real keys in tracked files with placeholders.
+3. Rewrite git history to remove leaked values, then force-push:
+
+```bash
+pip install git-filter-repo
+git filter-repo --replace-text <(echo 'sk-xxxxxx==>REMOVED')
+git push --force --all
+git push --force --tags
+```
+
+> Note: closing security alerts without revoking/rotating the key is not sufficient.
+
 ---
 
 ## 📂 File Structure
