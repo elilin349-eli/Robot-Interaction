@@ -123,7 +123,7 @@ pip install -r requirements.txt
 
 
 3. **Setup Keys:**
-Update your iFlytek and LLM API credentials in `.env` (refer to `config/env.example`).
+Copy `env.example` to `.env`, then update your iFlytek and LLM API credentials in `.env` only (do not commit `.env`).
 
 ---
 
