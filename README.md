@@ -140,7 +140,13 @@ git push --force --all
 git push --force --tags
 ```
 
-> Note: closing security alerts without revoking/rotating the key is not sufficient.
+Replace `sk-xxxxxx` with your leaked key pattern, for example:
+
+```bash
+git filter-repo --replace-text <(echo 'YOUR_LEAKED_KEY_HERE==>REMOVED')
+```
+
+> Note: closing security alerts without revoking/rotating the key does not sufficiently address the issue.
 
 ---
 
